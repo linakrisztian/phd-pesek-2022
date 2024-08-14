@@ -2,6 +2,7 @@
 
 import os
 import argparse
+import sys
 
 import numpy as np
 import tensorflow as tf
@@ -21,6 +22,66 @@ def rescale_image(input_image, input_mask):
 
     return input_image, input_mask
 
+def load_pretrained_model(model, id2code,
+                          tensor_shape, loss_function, tversky_alpha, tversky_beta,
+                          dropout_rate_input, dropout_rate_hidden, backbone, name,
+                          in_weights_path, model_new,
+                          finetune_old_inp_dim, finetune_old_out_dim):
+    # if input or output dimension changed w.r.t pretrained model
+    if finetune_old_inp_dim or finetune_old_out_dim:
+        if model == "U-Net":
+            # set dimensions for creating pretrained model
+            if finetune_old_inp_dim:
+                nr_bands = finetune_old_inp_dim
+            if finetune_old_out_dim:
+                num_class = finetune_old_out_dim
+            else:
+                num_class = len(id2code)
+
+            # creating model with dimensions of pretrained model
+            # NOTE: do not set create_model to verbose=False
+            # --> need once run model.summary() -> otherwise model dimensions are not set
+            print("------------------------------")
+            print("-- Start: Dimensions of OLD Model: --")
+            print("------------------------------")
+            model_old = create_model(
+                model, num_class , nr_bands, tensor_shape, nr_filters=32, loss=loss_function,
+                alpha=tversky_alpha, beta=tversky_beta,
+                dropout_rate_input=dropout_rate_input,
+                dropout_rate_hidden=dropout_rate_hidden, backbone=backbone, name=name)
+            print("----------------------------------")
+            print("-- End: Dimensions of OLD Model: --")
+            print("----------------------------------")
+            # load model weights of pretrained model
+            model_old.load_weights(in_weights_path)
+
+            # Set weights of new model, with weights of pretrained model
+            # NOTE: model.layers returns list of model layers BUT not necessarily in the correct order
+            # Thus have to explicitely check for first and last layer index
+            # Get all layer names:
+            layer_names = [layer.name for layer in model_new.layers]
+            # Get layer index of first downsampling block
+            chlayer_first = model_new.ds_blocks[0].name
+            ind_chlayer_first = layer_names.index(chlayer_first)
+            # Get layer index of last layer od model
+            chlayer_last = "classifier_layer"
+            ind_chlayer_last = layer_names.index(chlayer_last)
+            # iterate over all layers to set the weights
+            for ind in range(0,len(model_new.layers)):
+                # if input dimension changed, don't set weigts for this layer in new model
+                if ind == ind_chlayer_first and finetune_old_inp_dim:
+                    continue
+                # if output dimension changed, don't set weigts for this layer in new model
+                if ind == ind_chlayer_last and finetune_old_out_dim:
+                    continue
+                # set weights from pretrained model, for all remaining layers
+                model_new.layers[ind].set_weights(model_old.layers[ind].get_weights())
+        else:
+            sys.exit("ERROR: Change of input or output dimensions w.r.t pretrained models only "
+                        "supported for U-Net so far (parameter --finetune_old_inp_dim or --finetune_old_out_dim)")
+    else:
+        # if model dimension did not chainged, load weights from complete model
+        model_new.load_weights(in_weights_path)
 
 def main(operation, data_dir, output_dir, model, model_fn, in_weights_path=None,
          visualization_path='/tmp', nr_epochs=1, initial_epoch=0, batch_size=1,
@@ -82,61 +143,13 @@ def main(operation, data_dir, output_dir, model, model_fn, in_weights_path=None,
 
     # load weights if the model is supposed to do so (i.e. fine-tune mode)
     if operation == 'fine-tune':
-        # if input or output dimension changed w.r.t pretrained model
-        if finetune_old_inp_dim or finetune_old_out_dim:
-            if model == "U-Net":
-                # set dimensions for creating pretrained model
-                if finetune_old_inp_dim:
-                    nr_bands = finetune_old_inp_dim
-                if finetune_old_out_dim:
-                    num_class = finetune_old_out_dim
-                else:
-                    num_class = len(id2code)
-
-                # creating model with dimensions of pretrained model
-                # NOTE: do not set create_model to verbose=False
-                # --> need once run model.summary() -> otherwise model dimensions are not set
-                print("------------------------------")
-                print("-- Start: Dimensions of OLD Model: --")
-                print("------------------------------")
-                model_old = create_model(
-                    model, num_class , nr_bands, tensor_shape, nr_filters=32, loss=loss_function,
-                    alpha=tversky_alpha, beta=tversky_beta,
-                    dropout_rate_input=dropout_rate_input,
-                    dropout_rate_hidden=dropout_rate_hidden, backbone=backbone, name=name)
-                print("----------------------------------")
-                print("-- End: Dimensions of OLD Model: --")
-                print("----------------------------------")
-                # load model weights of pretrained model
-                model_old.load_weights(in_weights_path)
-
-                # Set weights of new model, with weights of pretrained model
-                # NOTE: model.layers returns list of model layers BUT not necessarily in the correct order
-                # Thus have to explicitely check for first and last layer index
-                # Get all layer names:
-                layer_names = [layer.name for layer in model_new.layers]
-                # Get layer index of first downsampling block
-                chlayer_first = model_new.ds_blocks[0].name
-                ind_chlayer_first = layer_names.index(chlayer_first)
-                # Get layer index of last layer od model
-                chlayer_last = "classifier_layer"
-                ind_chlayer_last = layer_names.index(chlayer_last)
-                # iterate over all layers to set the weights
-                for ind in range(0,len(model_new.layers)):
-                    # if input dimension changed, don't set weigts for this layer in new model
-                    if ind == ind_chlayer_first and finetune_old_inp_dim:
-                        continue
-                    # if output dimension changed, don't set weigts for this layer in new model
-                    if ind == ind_chlayer_last and finetune_old_out_dim:
-                        continue
-                    # set weights from pretrained model, for all remaining layers
-                    model_new.layers[ind].set_weights(model_old.layers[ind].get_weights())
-            else:
-                sys.exit("ERROR: Change of input or output dimensions w.r.t pretrained models only "
-                         "supported for U-Net so far (parameter --finetune_old_inp_dim or --finetune_old_out_dim)")
-        else:
-            # if model dimension did not chainged, load weights from complete model
-            model_new.load_weights(in_weights_path)
+        load_pretrained_model(
+            model, id2code,
+            tensor_shape, loss_function, tversky_alpha, tversky_beta,
+            dropout_rate_input, dropout_rate_hidden, backbone, name,
+            in_weights_path, model_new,
+            finetune_old_inp_dim, finetune_old_out_dim
+        )
 
     #train_generator = AugmentGenerator(
     #    data_dir, batch_size, 'train', fit_memory=fit_memory,
